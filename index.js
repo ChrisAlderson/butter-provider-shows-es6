@@ -30,7 +30,7 @@ class TVApi extends Generic {
     const match = url.match(/^cloudflare\+(.*):\/\/(.*)/);
     if (match) {
       options = Object.assign(options, {
-        uri: match[1] + '://cloudflare.com/',
+        uri: `${match[1]}://cloudflare.com/`,
         headers: {
           'Host': match[2],
           'User-Agent': 'Mozilla/5.0 (Linux) AppleWebkit/534.30 (KHTML, like Gecko) PT/3.8.0'
@@ -40,17 +40,18 @@ class TVApi extends Generic {
     return options;
   }
 
-  _get(index, url) {
+  _get(index, url, qs) {
     const req = this._processCloudFlareHack({
       url,
-      json: true
+      json: true,
+      qs
     }, this.apiURL[index]);
-    console.info('Request to TVApi', req.url);
+    console.info(`Request to TVApi: ${req.url}`);
 
     return new Promise((resolve, reject) => {
       request(req, (err, res, data) => {
         if (err || res.statusCode >= 400) {
-          console.warn('TVApi endpoint \'%s\' failed.', this.apiURL[index]);
+          console.warn(`TVApi endpoint '${this.apiURL[index]}' failed.`);
           if (index + 1 >= this.apiURL.length) {
             return reject(err || 'Status Code is above 400');
           } else {
@@ -58,7 +59,7 @@ class TVApi extends Generic {
           }
         } else if (!data || data.error) {
           err = data ? data.status_message : 'No data returned';
-          console.error('API error:', err);
+          console.error(`TVApi error: ${err}`);
           return reject(err);
         } else {
           return resolve(data);
@@ -78,13 +79,13 @@ class TVApi extends Generic {
     };
 
     if (filters.keywords) params.keywords = filters.keywords.replace(/\s/g, '% ');
-    if (filters.genre)   params.genre = filters.genre;
+    if (filters.genre) params.genre = filters.genre;
     if (filters.order) params.order = filters.order;
     if (filters.sorter && filters.sorter !== 'popularity') params.sort = filters.sorter;
 
     const index = 0;
-    const url = this.apiURL[index] + 'shows/' + filters.page + '?' + querystring.stringify(params).replace(/%25%20/g, '%20');
-    return this._get(index, url).then(data => {
+    const url = `${this.apiURL[index]}shows/${filters.page}`;
+    return this._get(index, url, params).then(data => {
       data.forEach(entry => entry.type = 'show');
 
       return {
@@ -96,8 +97,8 @@ class TVApi extends Generic {
 
   detail(torrent_id, old_data, debug) {
     const index = 0;
-    const url = this.apiURL[index] + 'show/' + torrent_id;
-    console.log(url);
+    const url = `${this.apiURL[index]}show/${torrent_id}`;
+
     return this._get(index, url).then(data => {
       console.log(data._id);
       if (this.translate && this.language !== 'en') {
@@ -114,7 +115,7 @@ class TVApi extends Generic {
         } else {
           const reqTimeout = setTimeout(() => sanitize(data), 2000);
 
-          console.info('Request to TVApi: \'%s\' - %s', old_data.title, this.language);
+          console.info(`Request to TVApi: '${old_data.title}' - ${this.language}`);
           return this.tvdb.getSeriesAllById(old_data.tvdb_id).then(localization => {
             clearTimeout(reqTimeout);
 
