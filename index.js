@@ -1,66 +1,91 @@
 'use strict';
 
-const Generic = require('butter-provider');
-const querystring = require('querystring');
+const Provider = require('butter-provider');
 const request = require('request');
 const sanitize = require('butter-sanitize');
-const TVDB = require('node-tvdb');
 
-class TVApi extends Generic {
+class TVShowApi extends Provider {
 
   constructor(args) {
     super(args);
 
-    if (args.apiURL) this.apiURL = args.apiURL.split(',');
+    if (!(this instanceof TVShowApi)) return new TVShowApi(args);
 
-    this.language = args.language;
-    this.quality = args.quality;
-    this.translate = args.translate;
+    this.apiURL = this.args.apiURL;
+  }
 
-    try {
-      this.tvdb = new TVDB('7B95D15E1BE1D75A');
-      this.tvdb.getLanguages().then(langlist => this.TVDBLangs = langlist);
-    } catch (err) {
-      this.TVDBLangs = false;
-      console.warn('Something went wrong with TVDB, overviews can\'t be translated.');
-    }
+  _formatDetail(show) {
+    return {
+      imdb_id: show.imdb_id,
+      title: show.title,
+      year: show.year,
+      genres: show.genres,
+      rating: parseInt(show.rating.percentage, 10) / 10,
+      poster: show.images.poster,
+      type: Provider.ItemType.TVSHOW,
+      num_seasons: show.num_seasons,
+      runtime: show.runtime,
+      backdrop: show.images.fanart,
+      synopsis: show.synopsis,
+      subtitle: {},
+      status: show.status,
+      episodes: show.episodes
+    };
+  }
+
+  _formatFetch(shows) {
+  	const results = shows.map(show => {
+      return {
+        imdb_id: show.imdb_id,
+        title: show.title,
+        year: show.year,
+        genres: show.genres,
+        rating: parseInt(show.rating.percentage, 10) / 10,
+        poster: show.images.poster,
+        type: Provider.ItemType.TVSHOW,
+        num_seasons: show.num_seasons
+      };
+    });
+
+  	return {
+  		results: sanitize(results),
+  		hasMore: true
+  	};
   }
 
   _processCloudFlareHack(options, url) {
-    const match = url.match(/^cloudflare\+(.*):\/\/(.*)/);
-    if (match) {
-      options = Object.assign(options, {
-        uri: `${match[1]}://cloudflare.com/`,
-        headers: {
-          'Host': match[2],
-          'User-Agent': 'Mozilla/5.0 (Linux) AppleWebkit/534.30 (KHTML, like Gecko) PT/3.8.0'
-        }
-      });
-    }
-    return options;
+  	const match = url.match(/^cloudflare\+(.*):\/\/(.*)/);
+  	if (match) {
+  		options = Object.assign(options, {
+  			uri: `${match[1]}://cloudflare.com/`,
+  			headers: {
+  				'Host': match[2],
+  				'User-Agent': 'Mozilla/5.0 (Linux) AppleWebkit/534.30 (KHTML, like Gecko) PT/3.8.0'
+  			}
+  		});
+  	}
+  	return options;
   }
 
   _get(index, url, qs) {
-    const req = this._processCloudFlareHack({
-      url,
-      json: true,
-      qs
-    }, this.apiURL[index]);
-    console.info(`Request to TVApi: ${req.url}`);
-
     return new Promise((resolve, reject) => {
-      request(req, (err, res, data) => {
+      const options = {
+        url: url,
+        json: true,
+        qs
+      };
+
+      const req = this._processCloudFlareHack(options, this.apiURL[index]);
+      return request.get(req, (err, res, data) => {
         if (err || res.statusCode >= 400) {
-          console.warn(`TVApi endpoint '${this.apiURL[index]}' failed.`);
           if (index + 1 >= this.apiURL.length) {
-            return reject(err || 'Status Code is above 400');
+            return reject(err || new Error('Status Code is above 400'));
           } else {
-            return this._get(index++, url);
+            return resolve(this._get(index++, url));
           }
         } else if (!data || data.error) {
           err = data ? data.status_message : 'No data returned';
-          console.error(`TVApi error: ${err}`);
-          return reject(err);
+          return reject(new Error(err));
         } else {
           return resolve(data);
         }
@@ -68,87 +93,93 @@ class TVApi extends Generic {
     });
   }
 
-  extractIds(items) {
-    return items.results.map(item => item.tvdb_id);
+  extractId(items) {
+  	return items.results.map(item => item[TVShowApi.prototype.config.uniqueId]);
   }
 
-  fetch(filters) {
-    const params = {
-      sort: 'seeds',
-      limit: '50'
-    };
+  fetch(filters, index = 0) {
+    const params = {};
 
     if (filters.keywords) params.keywords = filters.keywords.replace(/\s/g, '% ');
     if (filters.genre) params.genre = filters.genre;
     if (filters.order) params.order = filters.order;
     if (filters.sorter && filters.sorter !== 'popularity') params.sort = filters.sorter;
 
-    const index = 0;
+    filters.page = filters.page ? filters.page : 1;
+
     const url = `${this.apiURL[index]}shows/${filters.page}`;
-    return this._get(index, url, params).then(data => {
-      data.forEach(entry => entry.type = 'show');
-
-      return {
-        results: sanitize(data),
-        hasMore: true
-      }
-    });
+    return this._get(index, url, params).then(data => this._formatFetch(data));
   }
 
-  detail(torrent_id, old_data, debug) {
-    const index = 0;
+  detail(torrent_id, old_data, debug, index = 0) {
     const url = `${this.apiURL[index]}show/${torrent_id}`;
+    return this._get(index, url).then(data => this._formatDetail(data));
+  }
 
-    return this._get(index, url).then(data => {
-      console.log(data._id);
-      if (this.translate && this.language !== 'en') {
-        let langAvailable;
-        for (let x = 0; x < this.TVDBLangs.length; x++) {
-          if (this.TVDBLangs[x].abbreviation.indexOf(this.language) > -1) {
-            langAvailable = true;
-            break;
-          }
-        }
-
-        if (!langAvailable) {
-          return sanitize(data);
-        } else {
-          const reqTimeout = setTimeout(() => sanitize(data), 2000);
-
-          console.info(`Request to TVApi: '${old_data.title}' - ${this.language}`);
-          return this.tvdb.getSeriesAllById(old_data.tvdb_id).then(localization => {
-            clearTimeout(reqTimeout);
-
-            data = Object.assign(data, {
-              synopsis: localization.Overview
-            });
-
-            for (let i = 0; i < localization.Episodes.length; i++) {
-              for (let j = 0; j < data.episodes.length; j++) {
-                if (localization.Episodes[i].id.toString() === data.episodes[j].tvdb_id.toString()) {
-                  data.episodes[j].overview = localization.Episodes[i].Overview;
-                  break;
-                }
-              }
-            }
-
-            return sanitize(data);
-          }).catch(err => sanitize(data));
-        }
-      } else {
-        return sanitize(data);
-      }
-    });
+  random(index = 0) {
+    const url = `${this.apiURL[index]}random/show`;
+    return this._get(index, url).then(data => this._formatDetail(data));
   }
 
 }
 
-TVApi.prototype.config = {
-  name: 'TVApi',
-  uniqueId: 'tvdb_id',
-  tabName: 'TVApi',
-  type: 'tvshow',
-  metadata: 'trakttv:show-metadata'
+TVShowApi.prototype.config = {
+  name: 'TVShowApi',
+  uniqueId: 'imdb_id',
+  tabName: 'TVShowApi',
+  filters: {
+    sorters: {
+      trending: 'Trending',
+      popularity: 'Popularity',
+      updated: 'Updated',
+      year: 'Year',
+      name: 'Name',
+      rating: 'Rating'
+    },
+    genres: {
+      all: 'All',
+      action: 'Action',
+      adventure: 'Adventure',
+      animation: 'Animation',
+      comedy: 'Comedy',
+      crime: 'Crime',
+      disaster: 'Disaster',
+      documentary: 'Documentary',
+      drama: 'Drama',
+      eastern: 'Eastern',
+      family: 'Family',
+      'fan-film': 'Fan-Film',
+      fantasy: 'Fantasy',
+      'film-noir': 'Film-Noir',
+      history: 'History',
+      holiday: 'Holiday',
+      horror: 'Horror',
+      indie: 'Indie',
+      music: 'Music',
+      mystery: 'Mystery',
+      none: 'None',
+      road: 'Road',
+      romance: 'Romance',
+      'science-fiction': 'Science-Fiction',
+      short: 'Short',
+      sports: 'Sports',
+      'sporting-event': 'Sporting-Event',
+      suspense: 'Suspense',
+      thriller: 'Thriller',
+      'tv-movie': 'TV-Movie',
+      war: 'War',
+      western: 'Western'
+    }
+  },
+  defaults: {
+    apiURL: [
+      'https://tv-v2.api-fetch.website/',
+      'cloudflare+https://tv-v2.api-fetch.website/'
+    ]
+  },
+  args: {
+    apiURL: Provider.ArgType.ARRAY
+  }
 }
 
-module.exports = TVApi;
+module.exports = TVShowApi;
